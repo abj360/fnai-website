@@ -1,0 +1,20 @@
+# Model weights — downloaded at startup from Google Drive
+lmb_weights.pt
+weights.pt
+
+# Video assets — downloaded at startup from Google Drive
+gsla-video.mp4
+AR-research.mp4
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+venv/
+.env
+
+# Runtime
+*.log
+runs/

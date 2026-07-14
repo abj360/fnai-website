@@ -1,0 +1,10 @@
+weights.pt
+lmb_weights.pt
+gsla-video.mp4
+AR-research.mp4
+__pycache__/
+*.pyc
+venv/
+.env
+runs/
+*.log
