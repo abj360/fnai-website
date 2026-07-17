@@ -1,0 +1,14 @@
+# Controls what `gcloud run deploy --source .` uploads to Cloud Build.
+# IMPORTANT: gcloud uses THIS file, not .gitignore. We deliberately do NOT
+# ignore *.pt or *.mp4 here so the model weights + videos get baked into the image.
+.git/
+.venv/
+venv/
+__pycache__/
+*.pyc
+*.log
+runs/
+.env
+node_modules/
+# scratch / local-only
+*.md.bak

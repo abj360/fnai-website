@@ -123,11 +123,13 @@ def main():
 
     log.info("All required assets ready.")
     log.info("=" * 60)
-    log.info("Starting AquaVision server on port 7860 ...")
+    # Cloud Run (and most PaaS) inject the listen port via $PORT; default 7860 for HF Spaces.
+    port = os.environ.get("PORT", "7860")
+    log.info(f"Starting AquaVision server on port {port} ...")
     os.execvp("uvicorn", [
         "uvicorn", "server:app",
         "--host", "0.0.0.0",
-        "--port", "7860",
+        "--port", port,
     ])
 
 
