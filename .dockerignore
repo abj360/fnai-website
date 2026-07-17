@@ -1,0 +1,11 @@
+venv/
+.git/
+__pycache__/
+*.pyc
+*.log
+runs/
+.env
+# Large assets are fetched at runtime by startup.py
+*.mp4
+weights.pt
+lmb_weights.pt
