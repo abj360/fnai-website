@@ -41,7 +41,17 @@ if [[ -n "$oversize" ]]; then
   exit 1
 fi
 
-git push hf "$BRANCH:main" "$@"
+if ! git push hf "$BRANCH:main" "$@"; then
+  cat <<'EOM'
+
+Push rejected. The Space was created as a static Space, so its history is
+unrelated to this repo's — the first push has to replace it:
+
+    ./deploy-hf.sh --force
+
+EOM
+  exit 1
+fi
 
 cat <<EOF
 
