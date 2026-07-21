@@ -24,6 +24,7 @@ import tempfile
 import os
 import io
 import logging
+import requests
 from datetime import datetime
 
 import matplotlib
@@ -126,12 +127,66 @@ def get_species_config(key: str) -> dict:
     return SPECIES_CONFIG.get(key, SPECIES_CONFIG["vannamei"])
 
 # ─────────────────────────────────────────────────────────────────────────────
+# ROBOFLOW — hosted bass model, used when lmb_weights.pt is unavailable
+# ─────────────────────────────────────────────────────────────────────────────
+
+ROBOFLOW_API_KEY        = os.environ.get("ROBOFLOW_API_KEY", "tya4HWqSPsfoQAmR03ES")
+ROBOFLOW_MODEL_ENDPOINT = os.environ.get(
+    "ROBOFLOW_MODEL_ENDPOINT",
+    "https://serverless.roboflow.com/bass-fish-detection-06gec/1",
+)
+ROBOFLOW_CONFIDENCE = 40  # Roboflow scores 0–100
+
+# ─────────────────────────────────────────────────────────────────────────────
+# ASSET PROVISIONING — fetch weights from Google Drive at import
+#
+# startup.py does this too (it is the Docker CMD), but doing it here as well
+# means `uvicorn server:app` works on a bare host — run-local.sh, render.yaml,
+# and `python -m uvicorn` all skip startup.py.
+# ─────────────────────────────────────────────────────────────────────────────
+
+GDRIVE_ASSETS = [
+    {"file_id": "1IDKFEPPDOq7M1eMUogNH4CShipR2K794", "dest": "lmb_weights.pt", "min_bytes": 10_000_000},
+    {"file_id": "132EAQUDsNAJr6wKntWGkhgHksLJMLR7L", "dest": "weights.pt",     "min_bytes": 10_000_000},
+]
+
+def ensure_asset(file_id: str, dest: str, min_bytes: int) -> bool:
+    """Download dest from Google Drive unless a valid copy is already present."""
+    if os.path.exists(dest) and os.path.getsize(dest) >= min_bytes:
+        return True
+    if os.path.exists(dest):
+        log.warning(f"⚠️  {dest} is truncated ({os.path.getsize(dest)} bytes) — re-downloading")
+        os.remove(dest)
+    try:
+        import gdown
+    except ImportError:
+        log.warning(f"⚠️  gdown not installed — cannot fetch {dest}")
+        return False
+    log.info(f"⬇  Fetching {dest} from Google Drive ...")
+    for url in (
+        f"https://drive.google.com/uc?id={file_id}",
+        f"https://drive.google.com/uc?id={file_id}&confirm=t",
+    ):
+        try:
+            gdown.download(url, dest, quiet=True, fuzzy=True)
+            if os.path.exists(dest) and os.path.getsize(dest) >= min_bytes:
+                log.info(f"✅ {dest} ({os.path.getsize(dest) / 1e6:.1f} MB)")
+                return True
+        except Exception as e:
+            log.warning(f"   {url} failed: {e}")
+    log.error(f"❌ Could not fetch {dest} — check Drive sharing ('Anyone with the link')")
+    return False
+
+# ─────────────────────────────────────────────────────────────────────────────
 # MODEL LOADING
 # ─────────────────────────────────────────────────────────────────────────────
 
 log.info("=" * 60)
 log.info("INITIALIZING AQUAVISION API v4.0")
 log.info("=" * 60)
+
+for _asset in GDRIVE_ASSETS:
+    ensure_asset(**_asset)
 
 # Shrimp model (local weights.pt)
 shrimp_model = None
@@ -227,6 +282,73 @@ def lmb_range_warning(length_cm: float) -> Optional[str]:
     if length_cm < LMB_MIN_LENGTH_CM:
         return f"Length {length_cm:.1f}cm below training range (min {LMB_MIN_LENGTH_CM}cm) — prediction less reliable"
     return None
+
+def process_bass_with_roboflow(image_path: str) -> dict:
+    """
+    Fallback bass detector: Roboflow's hosted model. No local weights needed.
+
+    Roboflow returns boxes + confidence only — there is no calibrated length,
+    so length_cm/weight_g come back as em-dashes rather than fabricated numbers.
+    Same response shape as process_lmb_image() so the UI needs no changes.
+    """
+    try:
+        with open(image_path, "rb") as f:
+            image_b64 = base64.b64encode(f.read()).decode("utf-8")
+        resp = requests.post(
+            ROBOFLOW_MODEL_ENDPOINT,
+            params  = {"api_key": ROBOFLOW_API_KEY, "confidence": ROBOFLOW_CONFIDENCE},
+            data    = image_b64,
+            headers = {"Content-Type": "application/x-www-form-urlencoded"},
+            timeout = 30,
+        )
+        if resp.status_code != 200:
+            return {"error": f"Roboflow API error {resp.status_code}: {resp.text[:200]}"}
+        predictions = resp.json().get("predictions", [])
+    except Exception as e:
+        return {"error": f"Roboflow request failed: {e}"}
+
+    bgr = cv2.imread(image_path)
+    if bgr is None:
+        return {"error": "Could not read image."}
+    rgb   = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
+    color = SPECIES_CONFIG["bass"]["color"]
+
+    fish_predictions = []
+    for i, pred in enumerate(predictions):
+        x, y  = pred.get("x", 0), pred.get("y", 0)
+        w, h  = pred.get("width", 0), pred.get("height", 0)
+        conf  = float(pred.get("confidence", 0))
+        x1, y1 = int(x - w / 2), int(y - h / 2)
+        x2, y2 = int(x + w / 2), int(y + h / 2)
+
+        cv2.rectangle(rgb, (x1, y1), (x2, y2), color, 3)
+        label = f"{pred.get('class', 'bass')} {conf * 100:.0f}%"
+        font  = cv2.FONT_HERSHEY_SIMPLEX
+        (tw, th), _ = cv2.getTextSize(label, font, 0.7, 2)
+        ty = max(th + 10, y1 - 10)
+        cv2.rectangle(rgb, (x1 - 2, ty - th - 8), (x1 + tw + 4, ty + 4), (0, 0, 0), -1)
+        cv2.putText(rgb, label, (x1, ty - 2), font, 0.7, (255, 255, 255), 2, cv2.LINE_AA)
+
+        fish_predictions.append({
+            "fish_id"    : i + 1,
+            "length_cm"  : "—",
+            "weight_g"   : "—",
+            "confidence" : round(conf, 3),
+            "warning"    : None,
+        })
+
+    log.info(f"  Roboflow: {len(fish_predictions)} detection(s)")
+    return {
+        "detection_count" : len(fish_predictions),
+        "fish_predictions": fish_predictions,
+        "annotated_b64"   : encode_image_b64(rgb),
+        "calibration"     : {
+            "note"  : "Roboflow hosted model — detection + confidence only. "
+                      "Length/weight needs the local LMB model (lmb_weights.pt).",
+            "source": ROBOFLOW_MODEL_ENDPOINT,
+        },
+    }
+
 
 def process_lmb_image(image_path: str, cfg: dict) -> dict:
     """
@@ -345,6 +467,8 @@ def health():
         "lmb_model"      : lmb_model is not None,
         "version"        : "4.0",
         "timestamp"      : datetime.now().isoformat(),
+        "bass_backend"   : "local LMB model" if lmb_model is not None else "Roboflow hosted",
+        "roboflow_configured": bool(ROBOFLOW_API_KEY),
         "lmb_config"     : {
             "px_per_cm"       : LMB_PX_PER_CM,
             "fin_correction"  : LMB_FIN_CORRECTION,
@@ -393,8 +517,12 @@ async def detect_bass(
             image_path = tmp.name
 
         try:
-            log.info(f"🐟 LMB inference: {up.filename}")
-            result = process_lmb_image(image_path, SPECIES_CONFIG["bass"])
+            if lmb_model is not None:
+                log.info(f"🐟 LMB inference: {up.filename}")
+                result = process_lmb_image(image_path, SPECIES_CONFIG["bass"])
+            else:
+                log.info(f"🐟 LMB model unavailable — Roboflow fallback: {up.filename}")
+                result = process_bass_with_roboflow(image_path)
 
             if "error" in result:
                 per_image.append({"filename": up.filename, "error": result["error"]})
@@ -402,8 +530,11 @@ async def detect_bass(
 
             total_fish += result["detection_count"]
             for p in result["fish_predictions"]:
-                all_lengths.append(p["length_cm"])
-                all_weights.append(p["weight_g"])
+                # Roboflow gives no calibrated measurement — those come back "—"
+                if isinstance(p["length_cm"], (int, float)):
+                    all_lengths.append(p["length_cm"])
+                if isinstance(p["weight_g"], (int, float)):
+                    all_weights.append(p["weight_g"])
 
             per_image.append({
                 "filename"         : up.filename,
@@ -422,8 +553,23 @@ async def detect_bass(
             except Exception:
                 pass
 
-    avg_length = round(float(np.mean(all_lengths)), 2) if all_lengths else 0.0
-    avg_weight = round(float(np.mean(all_weights)), 1) if all_weights else 0.0
+    using_lmb = lmb_model is not None
+    summary   = {"total_fish": total_fish}
+
+    # Only report measurements we actually computed — an empty run stays "—"
+    # in the UI rather than reading as a confident 0.0 cm / 0.0 g.
+    if all_lengths:
+        summary["avg_length_cm"] = round(float(np.mean(all_lengths)), 2)
+    if all_weights:
+        summary["avg_weight_g"]   = round(float(np.mean(all_weights)), 1)
+        summary["total_biomass_g"] = round(sum(all_weights), 1)
+    if using_lmb:
+        summary["formula"]   = f"W = {LMB_ALLOMETRIC_A} × L^{LMB_ALLOMETRIC_B}"
+        summary["r_squared"] = 0.946
+        summary["rmse_g"]    = 1.75
+    else:
+        summary["note"] = ("Roboflow hosted model — detection count only. "
+                           "Length/weight needs lmb_weights.pt.")
 
     return JSONResponse({
         "timestamp"    : datetime.now().isoformat(),
@@ -432,16 +578,9 @@ async def detect_bass(
             "display_name"    : "Largemouth Bass",
             "scientific_name" : "Micropterus salmoides",
         },
-        "detection_method" : "YOLOv11s-seg + allometric curve (W=a·L^b)",
-        "overall_summary"  : {
-            "total_fish"       : total_fish,
-            "avg_length_cm"    : avg_length,
-            "avg_weight_g"     : avg_weight,
-            "total_biomass_g"  : round(sum(all_weights), 1),
-            "formula"          : f"W = {LMB_ALLOMETRIC_A} × L^{LMB_ALLOMETRIC_B}",
-            "r_squared"        : 0.946,
-            "rmse_g"           : 1.75,
-        },
+        "detection_method" : "YOLOv11s-seg + allometric curve (W=a·L^b)"
+                             if using_lmb else "Roboflow hosted model",
+        "overall_summary"  : summary,
         "per_image" : per_image,
     })
 
