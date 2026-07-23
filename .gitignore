@@ -9,3 +9,4 @@ venv/
 runs/
 *.log
 .venv/
+*.mp4
