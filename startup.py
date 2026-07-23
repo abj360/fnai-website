@@ -46,6 +46,30 @@ ASSETS = [
         "min_bytes": 100_000,
         "required" : False,
     },
+    {
+        "file_id"  : "1NCW0-Yo7Q_efXkwbal7tQoZcCkH9heu4",
+        "dest"     : "dr-ramena.png",
+        "min_bytes": 100_000,
+        "required" : False,
+    },
+    {
+        "file_id"  : "1J2bq_CUtUhImcGQCavoogP6-n_A9lLbg",
+        "dest"     : "ara-logo.png",
+        "min_bytes": 10_000,
+        "required" : False,
+    },
+    {
+        "file_id"  : "1L1FNJsRCjDLobaajioQ-YlzkB8WOsreb",
+        "dest"     : "gsla-logo.png",
+        "min_bytes": 10_000,
+        "required" : False,
+    },
+    {
+        "file_id"  : "19bAC_latHTFHg-IQWVPUL_vB2W8n-NU5",
+        "dest"     : "UAPB-logo.png",
+        "min_bytes": 10_000,
+        "required" : False,
+    },
 ]
 
 
