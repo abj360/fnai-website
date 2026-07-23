@@ -55,19 +55,19 @@ ASSETS = [
     {
         "file_id"  : "1J2bq_CUtUhImcGQCavoogP6-n_A9lLbg",
         "dest"     : "ara-logo.png",
-        "min_bytes": 10_000,
+        "min_bytes": 1_000,
         "required" : False,
     },
     {
         "file_id"  : "1L1FNJsRCjDLobaajioQ-YlzkB8WOsreb",
         "dest"     : "gsla-logo.png",
-        "min_bytes": 10_000,
+        "min_bytes": 1_000,
         "required" : False,
     },
     {
         "file_id"  : "19bAC_latHTFHg-IQWVPUL_vB2W8n-NU5",
         "dest"     : "UAPB-logo.png",
-        "min_bytes": 10_000,
+        "min_bytes": 1_000,
         "required" : False,
     },
 ]

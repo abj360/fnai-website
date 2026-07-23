@@ -262,6 +262,41 @@ def get_size_category(length_mm: float, cfg: dict) -> str:
 # HELPERS — LMB specific
 # ─────────────────────────────────────────────────────────────────────────────
 
+def build_histograms(all_lengths: list, all_weights: list,
+                     display_name: str, length_unit: str = "mm") -> dict:
+    """Length/weight distribution PNGs (base64) — every species tab renders these."""
+    histograms: dict = {}
+    if not all_lengths:
+        return histograms
+    for metric, vals, unit, color in [
+        ("length", all_lengths, length_unit, "#0066FF"),
+        ("weight", all_weights, "g",         "#7B61FF"),
+    ]:
+        if not vals:
+            continue
+        try:
+            fig, ax = plt.subplots(figsize=(6, 3), facecolor="#F8FAFC")
+            ax.set_facecolor("#F8FAFC")
+            ax.hist(vals, bins=20, color=color, edgecolor="white", alpha=0.85)
+            avg = float(np.mean(vals))
+            ax.axvline(avg, color="#00C48C", linestyle="--", linewidth=2,
+                       label=f"Mean: {avg:.1f}{unit}")
+            ax.set_xlabel(f"{metric.capitalize()} ({unit})", fontsize=10)
+            ax.set_ylabel("Frequency", fontsize=10)
+            ax.set_title(f"{display_name} {metric.capitalize()} Distribution",
+                         fontsize=11, fontweight="bold")
+            ax.legend(fontsize=8)
+            for spine in ["top", "right"]:
+                ax.spines[spine].set_visible(False)
+            plt.tight_layout()
+            buf = io.BytesIO()
+            fig.savefig(buf, format="png", dpi=120, facecolor="#F8FAFC", bbox_inches="tight")
+            plt.close(fig)
+            histograms[f"{metric}_histogram_base64"] = base64.b64encode(buf.getvalue()).decode()
+        except Exception as e:
+            log.error(f"Histogram error: {e}")
+    return histograms
+
 def predict_lmb_weight(length_cm: float) -> float:
     """Allometric power law: W = a × L^b"""
     return LMB_ALLOMETRIC_A * (length_cm ** LMB_ALLOMETRIC_B)
@@ -383,8 +418,13 @@ def process_lmb_image(image_path: str, cfg: dict) -> dict:
     ax.axis("off")
 
     fish_predictions = []
+    # Normalised boxes so the browser can re-draw the detections over the user's
+    # own copy of the image (the reticle reveal in the console).
+    detections = []
+    img_h = bgr.shape[0]
 
     if result.masks is not None and n_det > 0:
+        xyxy = result.boxes.xyxy.cpu().numpy()
         for i, (poly, conf) in enumerate(
             zip(result.masks.xy, result.boxes.conf.cpu().numpy())
         ):
@@ -425,6 +465,15 @@ def process_lmb_image(image_path: str, cfg: dict) -> dict:
                 "warning"    : warning,
             })
 
+            bx = xyxy[i]
+            detections.append({
+                "box"       : [round(float(bx[0]) / img_width, 5), round(float(bx[1]) / img_h, 5),
+                               round(float(bx[2]) / img_width, 5), round(float(bx[3]) / img_h, 5)],
+                "length"    : round(float(length_cm), 2),
+                "weight"    : round(float(weight_g), 1),
+                "confidence": round(float(conf), 3),
+            })
+
             log.info(
                 f"  Fish {i+1}: {length_px:.0f}px → {length_cm:.1f}cm "
                 f"→ {weight_g:.1f}g [conf={conf:.2f}]"
@@ -445,6 +494,8 @@ def process_lmb_image(image_path: str, cfg: dict) -> dict:
     return {
         "detection_count" : n_det,
         "fish_predictions": fish_predictions,
+        "detections"      : detections,
+        "image_size"      : [img_width, img_h],
         "annotated_b64"   : annotated_b64,
         "calibration"     : {
             "px_per_cm"      : px_per_cm,
@@ -540,6 +591,8 @@ async def detect_bass(
                 "filename"         : up.filename,
                 "detection_count"  : result["detection_count"],
                 "fish_predictions" : result["fish_predictions"],
+                "detections"       : result.get("detections", []),
+                "image_size"       : result.get("image_size"),
                 "calibration"      : result["calibration"],
                 "annotated_image_png_base64": result["annotated_b64"],
             })
@@ -581,6 +634,8 @@ async def detect_bass(
         "detection_method" : "YOLOv11s-seg + allometric curve (W=a·L^b)"
                              if using_lmb else "Roboflow hosted model",
         "overall_summary"  : summary,
+        "histograms"       : build_histograms(all_lengths, all_weights,
+                                              "Largemouth Bass", "cm"),
         "per_image" : per_image,
     })
 
@@ -631,7 +686,11 @@ async def detect(
 
             rgb     = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
             overlay = rgb.copy()
+            img_h, img_w = rgb.shape[:2]
             lengths_mm, weights_g, text_labels = [], [], []
+            # Normalised boxes so the browser can re-draw the detections over the
+            # user's own copy of the image (the reticle reveal in the console).
+            detections = []
 
             if r.masks is not None and r.boxes is not None:
                 for mask, box in zip(r.masks, r.boxes):
@@ -653,6 +712,14 @@ async def detect(
                     cv2.fillPoly(overlay, [pts_int], color=species_cfg["color"])
                     x1 = int(box.xyxy[0][0]); y1 = int(box.xyxy[0][1])
                     text_labels.append((x1, y1, f"{length_mm:.1f}mm | {weight_g:.2f}g"))
+                    bx = [float(v) for v in box.xyxy[0]]
+                    detections.append({
+                        "box"       : [round(bx[0] / img_w, 5), round(bx[1] / img_h, 5),
+                                       round(bx[2] / img_w, 5), round(bx[3] / img_h, 5)],
+                        "length"    : round(float(length_mm), 2),
+                        "weight"    : round(float(weight_g), 3),
+                        "confidence": round(conf, 3),
+                    })
 
             annotated = cv2.addWeighted(rgb, 1 - MASK_ALPHA, overlay, MASK_ALPHA, 0)
             for (x, y, text) in text_labels:
@@ -681,6 +748,8 @@ async def detect(
                     "total_biomass_g"   : round(sum(weights_g), 3),
                 },
                 "annotated_image_png_base64": b64,
+                "detections"     : detections,
+                "image_size"     : [img_w, img_h],
                 "detection_method": "Local YOLO",
             })
 
@@ -694,33 +763,8 @@ async def detect(
                 pass
 
     # Histograms
-    histograms = {}
-    if all_lengths:
-        for metric, vals, unit, color in [
-            ("length", all_lengths, "mm", "#0066FF"),
-            ("weight", all_weights, "g",  "#7B61FF"),
-        ]:
-            try:
-                fig, ax = plt.subplots(figsize=(6, 3), facecolor="#F8FAFC")
-                ax.set_facecolor("#F8FAFC")
-                ax.hist(vals, bins=20, color=color, edgecolor="white", alpha=0.85)
-                avg = float(np.mean(vals))
-                ax.axvline(avg, color="#00C48C", linestyle="--", linewidth=2,
-                           label=f"Mean: {avg:.1f}{unit}")
-                ax.set_xlabel(f"{metric.capitalize()} ({unit})", fontsize=10)
-                ax.set_ylabel("Frequency", fontsize=10)
-                ax.set_title(f"{species_cfg['display_name']} {metric.capitalize()} Distribution",
-                             fontsize=11, fontweight="bold")
-                ax.legend(fontsize=8)
-                for spine in ["top", "right"]:
-                    ax.spines[spine].set_visible(False)
-                plt.tight_layout()
-                buf = io.BytesIO()
-                fig.savefig(buf, format="png", dpi=120, facecolor="#F8FAFC", bbox_inches="tight")
-                plt.close(fig)
-                histograms[f"{metric}_histogram_base64"] = base64.b64encode(buf.getvalue()).decode()
-            except Exception as e:
-                log.error(f"Histogram error: {e}")
+    histograms = build_histograms(all_lengths, all_weights,
+                                  species_cfg["display_name"], "mm")
 
     size_dist = {"juvenile": 0, "sub-harvest": 0, "harvestable": 0, "optimal": 0}
     for l in all_lengths:
